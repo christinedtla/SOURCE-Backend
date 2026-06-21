@@ -151,6 +151,7 @@ app.post('/api/research-vendors', async (req, res) => {
     for (const company of companies) {
       try {
         const searchQuery = company.website ? `${company.name} ${company.website}` : company.name;
+        console.log(`\n=== Researching: ${searchQuery} ===`);
         
         // Initial message to search the web
         let messages = [
@@ -176,6 +177,7 @@ Then provide ONLY this JSON (no markdown, no extra text):
         ];
         
         // First request with web search enabled
+        console.log('Sending first request to Claude...');
         let response = await anthropic.messages.create({
           model: 'claude-sonnet-4-6',
           max_tokens: 2000,
@@ -188,12 +190,19 @@ Then provide ONLY this JSON (no markdown, no extra text):
           messages: messages
         });
         
+        console.log('First response - stop_reason:', response.stop_reason);
+        console.log('First response - content blocks:', response.content.length);
+        response.content.forEach((block, i) => {
+          console.log(`  Block ${i}: type=${block.type}, text=${block.text ? block.text.substring(0, 100) : 'N/A'}`);
+        });
+        
         // Handle agentic loop - if Claude used tool, continue conversation
         let attempts = 0;
         const maxAttempts = 3;
         
         while (response.stop_reason === 'tool_use' && attempts < maxAttempts) {
           attempts++;
+          console.log(`Continuing conversation (attempt ${attempts})...`);
           
           // Add Claude's response to message history
           messages.push({
@@ -219,6 +228,12 @@ Then provide ONLY this JSON (no markdown, no extra text):
             ],
             messages: messages
           });
+          
+          console.log(`Response ${attempts} - stop_reason:`, response.stop_reason);
+          console.log(`Response ${attempts} - content blocks:`, response.content.length);
+          response.content.forEach((block, i) => {
+            console.log(`  Block ${i}: type=${block.type}, text=${block.text ? block.text.substring(0, 150) : 'N/A'}`);
+          });
         }
         
         // Extract text from final response
@@ -229,8 +244,10 @@ Then provide ONLY this JSON (no markdown, no extra text):
           }
         }
         
+        console.log('Final response text:', responseText.substring(0, 300));
+        
         if (!responseText || responseText.trim().length === 0) {
-          console.error('No text response from Claude for:', company.name);
+          console.error('ERROR: No text response from Claude for:', company.name);
           continue;
         }
         
@@ -239,11 +256,13 @@ Then provide ONLY this JSON (no markdown, no extra text):
         const jsonMatch = responseText.match(/\{[\s\S]*\}/);
         
         if (!jsonMatch) {
-          console.error('No JSON found in response for:', company.name, 'Response:', responseText.substring(0, 200));
+          console.error('ERROR: No JSON found in response for:', company.name);
+          console.error('Response was:', responseText.substring(0, 500));
           continue;
         }
         
         const vendorData = JSON.parse(jsonMatch[0]);
+        console.log('SUCCESS: Parsed vendor data:', vendorData.name);
         
         // Ensure all required fields exist
         vendorData.logo_url = null;
@@ -252,14 +271,15 @@ Then provide ONLY this JSON (no markdown, no extra text):
         vendorData.updated_at = new Date().toISOString();
         
         vendors.push(vendorData);
-        console.log('Successfully researched:', vendorData.name);
         
       } catch (error) {
-        console.error('Error researching company:', company.name, error.message);
+        console.error('ERROR researching company:', company.name, error.message);
+        console.error('Stack:', error.stack);
         continue;
       }
     }
     
+    console.log(`\n=== Research complete: ${vendors.length} vendors found ===\n`);
     res.json({ vendors });
   } catch (error) {
     console.error('Research endpoint error:', error);
