@@ -135,6 +135,73 @@ app.delete('/api/vendors/:id', async (req, res) => {
   }
 });
 
+// ============ VENDOR RESEARCH (ADMIN) ============
+
+// Research and populate vendor data from company names
+app.post('/api/research-vendors', async (req, res) => {
+  try {
+    const { companies } = req.body;
+    
+    if (!companies || !Array.isArray(companies)) {
+      return res.status(400).json({ error: 'Invalid input' });
+    }
+    
+    const vendors = [];
+    
+    for (const company of companies) {
+      try {
+        // Use Claude to research the company
+        const prompt = `Research this company and provide structured data in JSON format:
+        
+Company Name: ${company.name}
+Website: ${company.website || 'Unknown'}
+
+Provide a JSON response with exactly these fields (use null for unknown):
+{
+  "cage_code": "XXXXX or similar identifier",
+  "name": "Full company name",
+  "location": "City, Country",
+  "website": "company website URL",
+  "description": "2-3 sentence description of what they do",
+  "category": "Choose from: ICT & Semiconductors, Machine Tools, Auto Parts, Machinery & Reactors, Electrical Machinery, Plastics & Chemicals, Optical Instruments, Medical Equipment, Metals & Steel, Hand Tools & Hardware, Textiles & Apparel, Food & Agriculture, Renewable Energy & Smart Infrastructure",
+  "business_size": "Small, Medium, or Large",
+  "employees": null or number,
+  "made_in_usa": true or false,
+  "taa_verified": true or false,
+  "berry_act_eligible": true or false
+}
+
+Only return valid JSON, no markdown or extra text.`;
+
+        const response = await anthropic.messages.create({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 500,
+          messages: [
+            { role: 'user', content: prompt }
+          ]
+        });
+        
+        const responseText = response.content[0].type === 'text' ? response.content[0].text : '';
+        
+        // Parse JSON response
+        const vendorData = JSON.parse(responseText);
+        
+        // Add defaults
+        vendorData.logo_url = null;
+        vendorData.product_images = [];
+        
+        vendors.push(vendorData);
+      } catch (error) {
+        console.error('Error researching company:', company.name, error);
+      }
+    }
+    
+    res.json({ vendors });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============ CONTACT INQUIRIES ============
 
 // Submit contact inquiry
