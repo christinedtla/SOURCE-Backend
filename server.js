@@ -150,59 +150,69 @@ app.post('/api/research-vendors', async (req, res) => {
     
     for (const company of companies) {
       try {
-        // Search the web for company info
+        // Create a detailed prompt for Claude to research the company
         const searchQuery = company.website ? `${company.name} ${company.website}` : company.name;
         
+        const prompt = `You are a vendor research assistant. Search your knowledge and the internet for information about this company:
+
+Company Name: ${company.name}
+Website: ${company.website || 'Not provided'}
+
+Research this company thoroughly and return ONLY a valid JSON object (no markdown backticks, no extra text):
+
+{
+  "cage_code": "CAGE code if found, otherwise null",
+  "name": "Official full company name",
+  "location": "City, State/Country",
+  "website": "Primary company website",
+  "description": "2-3 sentences about what they manufacture/provide",
+  "category": "Best category match: ICT & Semiconductors, Machine Tools, Auto Parts, Machinery & Reactors, Electrical Machinery, Plastics & Chemicals, Optical Instruments, Medical Equipment, Metals & Steel, Hand Tools & Hardware, Textiles & Apparel, Food & Agriculture, or Renewable Energy & Smart Infrastructure",
+  "business_size": "Small, Medium, or Large based on employee count",
+  "employees": "Estimated employee count or null",
+  "made_in_usa": "true or false",
+  "taa_verified": "true or false if information available, otherwise false",
+  "berry_act_eligible": "true or false if information available, otherwise false"
+}
+
+Be practical: if exact info is unavailable, make reasonable inferences based on company size and industry. Return valid JSON only.`;
+
         const response = await anthropic.messages.create({
           model: 'claude-sonnet-4-6',
-          max_tokens: 1500,
-          tools: [
-            {
-              type: 'web_search',
-              name: 'web_search'
-            }
-          ],
+          max_tokens: 1000,
           messages: [
             { 
               role: 'user', 
-              content: `Search the web for information about "${searchQuery}" and then provide structured vendor data in JSON format.
-
-After searching, extract this information and return ONLY valid JSON (no markdown, no extra text):
-{
-  "cage_code": "CAGE code if available, or null",
-  "name": "Full official company name",
-  "location": "City, State/Province, Country",
-  "website": "primary company website URL",
-  "description": "2-3 sentence description of their main products/services",
-  "category": "Best fit from: ICT & Semiconductors, Machine Tools, Auto Parts, Machinery & Reactors, Electrical Machinery, Plastics & Chemicals, Optical Instruments, Medical Equipment, Metals & Steel, Hand Tools & Hardware, Textiles & Apparel, Food & Agriculture, Renewable Energy & Smart Infrastructure",
-  "business_size": "Small, Medium, or Large",
-  "employees": null or estimated number,
-  "made_in_usa": true or false,
-  "taa_verified": true or false,
-  "berry_act_eligible": true or false
-}
-
-Be practical: if you can't find specific info, make a reasonable inference from what you find or use null.`
+              content: prompt
             }
           ]
         });
         
-        // Extract the text response (after any tool use)
+        // Extract text from response
         let responseText = '';
-        for (const block of response.content) {
-          if (block.type === 'text') {
-            responseText = block.text;
-            break;
+        if (response.content && response.content.length > 0) {
+          for (const block of response.content) {
+            if (block.type === 'text') {
+              responseText = block.text;
+              break;
+            }
           }
         }
         
-        // Clean up JSON (remove markdown if present)
-        responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        if (!responseText) {
+          console.error('No text response from Claude for:', company.name);
+          continue;
+        }
         
-        // Parse JSON response
+        // Clean JSON (remove markdown if present)
+        responseText = responseText.trim();
+        if (responseText.includes('```')) {
+          responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        }
+        
+        // Parse JSON
         const vendorData = JSON.parse(responseText);
         
-        // Ensure required fields exist
+        // Ensure required fields
         vendorData.logo_url = null;
         vendorData.product_images = [];
         vendorData.created_at = new Date().toISOString();
@@ -211,7 +221,7 @@ Be practical: if you can't find specific info, make a reasonable inference from 
         vendors.push(vendorData);
       } catch (error) {
         console.error('Error researching company:', company.name, error.message);
-        // Continue with next company instead of failing
+        // Continue with next company
       }
     }
     
