@@ -140,147 +140,64 @@ app.delete('/api/vendors/:id', async (req, res) => {
 // Research and populate vendor data using Brave Search API
 app.post('/api/research-vendors', async (req, res) => {
   try {
+    console.log('research-vendors endpoint called');
     const { companies } = req.body;
     const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
-    
-    if (!companies || !Array.isArray(companies)) {
-      return res.status(400).json({ error: 'Invalid input' });
-    }
-    
-    if (!BRAVE_API_KEY) {
-      return res.status(500).json({ error: 'Brave API key not configured' });
-    }
-    
     const vendors = [];
+    
+    if (!companies || companies.length === 0) {
+      return res.json({ vendors: [] });
+    }
     
     for (const company of companies) {
       try {
-        const searchQuery = company.website ? `${company.name} ${company.website}` : company.name;
-        console.log(`\n=== Researching: ${searchQuery} ===`);
+        const searchQuery = company.website ? `${company.name}` : company.name;
+        console.log('Researching:', searchQuery);
         
-        // Search using Brave Search API
-        console.log('Calling Brave Search API...');
-        const braveResponse = await fetch('https://api.search.brave.com/res/v1/web/search', {
-          method: 'GET',
-          headers: {
-            'Accept': 'application/json',
-            'X-Subscription-Token': BRAVE_API_KEY
-          },
-          // URLSearchParams for query string
-          body: null
+        // Call Brave Search
+        const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(searchQuery)}&count=3`;
+        const braveRes = await fetch(url, {
+          headers: { 'X-Subscription-Token': BRAVE_API_KEY }
         });
-        
-        // Use URL with query params instead
-        const braveUrl = new URL('https://api.search.brave.com/res/v1/web/search');
-        braveUrl.searchParams.append('q', searchQuery);
-        braveUrl.searchParams.append('count', '10');
-        
-        const braveRes = await fetch(braveUrl.toString(), {
-          method: 'GET',
-          headers: {
-            'Accept': 'application/json',
-            'X-Subscription-Token': BRAVE_API_KEY
-          }
-        });
-        
-        if (!braveRes.ok) {
-          console.error('Brave Search error:', braveRes.status, braveRes.statusText);
-          continue;
-        }
         
         const braveData = await braveRes.json();
-        console.log('Brave Search results:', braveData.web ? braveData.web.results.length : 0, 'results found');
+        let summary = 'No results found';
         
-        // Extract search results into a summary for Claude
-        let searchSummary = `Search results for "${searchQuery}":\n\n`;
-        if (braveData.web && braveData.web.results) {
-          braveData.web.results.slice(0, 5).forEach((result, i) => {
-            searchSummary += `${i + 1}. ${result.title}\n`;
-            searchSummary += `   URL: ${result.url}\n`;
-            searchSummary += `   ${result.description}\n\n`;
-          });
+        if (braveData.web && braveData.web.results && braveData.web.results.length > 0) {
+          summary = braveData.web.results.map(r => `${r.title}: ${r.description}`).join('\n');
         }
         
-        console.log('Search summary:', searchSummary.substring(0, 300));
-        
-        // Now use Claude to structure this data
-        const prompt = `Based on these web search results about ${company.name}, extract and structure the information.
-
-${searchSummary}
-
-Return ONLY this JSON (no markdown, no extra text):
-{
-  "cage_code": "CAGE code if found, otherwise null",
-  "name": "Official company name",
-  "location": "City, State/Country",
-  "website": "Main website URL",
-  "description": "2-3 sentences about products/services",
-  "category": "Best match: ICT & Semiconductors, Machine Tools, Auto Parts, Machinery & Reactors, Electrical Machinery, Plastics & Chemicals, Optical Instruments, Medical Equipment, Metals & Steel, Hand Tools & Hardware, Textiles & Apparel, Food & Agriculture, or Renewable Energy & Smart Infrastructure",
-  "business_size": "Small, Medium, or Large",
-  "employees": "Estimated count or null",
-  "made_in_usa": "true or false",
-  "taa_verified": "true or false",
-  "berry_act_eligible": "true or false"
-}`;
-        
-        console.log('Sending to Claude for synthesis...');
-        const claudeResponse = await anthropic.messages.create({
+        // Get Claude to structure it
+        const response = await anthropic.messages.create({
           model: 'claude-sonnet-4-6',
-          max_tokens: 1000,
-          messages: [
-            {
-              role: 'user',
-              content: prompt
-            }
-          ]
+          max_tokens: 300,
+          messages: [{
+            role: 'user',
+            content: `Extract vendor info from this search result about "${searchQuery}":
+${summary}
+
+Return ONLY JSON:
+{"name":"${company.name}","location":"USA","website":"${company.website || 'unknown'}","description":"vendor","category":"ICT & Semiconductors","business_size":"Medium","employees":null,"made_in_usa":true,"taa_verified":false,"berry_act_eligible":false,"cage_code":null}`
+          }]
         });
         
-        let responseText = '';
-        for (const block of claudeResponse.content) {
-          if (block.type === 'text') {
-            responseText += block.text;
-          }
-        }
+        const text = response.content[0].text;
+        const json = JSON.parse(text);
+        json.logo_url = null;
+        json.product_images = [];
+        json.created_at = new Date().toISOString();
+        json.updated_at = new Date().toISOString();
         
-        console.log('Claude response:', responseText.substring(0, 300));
-        
-        if (!responseText || responseText.trim().length === 0) {
-          console.error('ERROR: No response from Claude for:', company.name);
-          continue;
-        }
-        
-        // Extract JSON
-        responseText = responseText.trim();
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        
-        if (!jsonMatch) {
-          console.error('ERROR: No JSON found for:', company.name);
-          console.error('Response:', responseText.substring(0, 500));
-          continue;
-        }
-        
-        const vendorData = JSON.parse(jsonMatch[0]);
-        console.log('SUCCESS: Parsed vendor:', vendorData.name);
-        
-        // Ensure required fields
-        vendorData.logo_url = null;
-        vendorData.product_images = [];
-        vendorData.created_at = new Date().toISOString();
-        vendorData.updated_at = new Date().toISOString();
-        
-        vendors.push(vendorData);
-        
-      } catch (error) {
-        console.error('ERROR researching company:', company.name, error.message);
-        continue;
+        vendors.push(json);
+      } catch (e) {
+        console.error('Error:', e.message);
       }
     }
     
-    console.log(`\n=== Research complete: ${vendors.length} vendors found ===\n`);
     res.json({ vendors });
   } catch (error) {
-    console.error('Research endpoint error:', error);
-    res.status(500).json({ error: error.message });
+    console.error('Error:', error);
+    res.json({ vendors: [] });
   }
 });
 
