@@ -137,7 +137,7 @@ app.delete('/api/vendors/:id', async (req, res) => {
 
 // ============ VENDOR RESEARCH (ADMIN) ============
 
-// Research and populate vendor data from company names
+// Research and populate vendor data from company names using web search
 app.post('/api/research-vendors', async (req, res) => {
   try {
     const { companies } = req.body;
@@ -150,67 +150,78 @@ app.post('/api/research-vendors', async (req, res) => {
     
     for (const company of companies) {
       try {
-        // Create a detailed prompt for Claude to research the company
         const searchQuery = company.website ? `${company.name} ${company.website}` : company.name;
         
-        const prompt = `You are a vendor research assistant. Search your knowledge and the internet for information about this company:
-
-Company Name: ${company.name}
-Website: ${company.website || 'Not provided'}
-
-Research this company thoroughly and return ONLY a valid JSON object (no markdown backticks, no extra text):
-
+        // First message: ask Claude to search the web
+        const messages = [
+          { 
+            role: 'user', 
+            content: `Search the web for detailed information about: ${searchQuery}
+            
+Then extract and return ONLY this JSON (no markdown, no extra text):
 {
-  "cage_code": "CAGE code if found, otherwise null",
-  "name": "Official full company name",
-  "location": "City, State/Country",
-  "website": "Primary company website",
-  "description": "2-3 sentences about what they manufacture/provide",
-  "category": "Best category match: ICT & Semiconductors, Machine Tools, Auto Parts, Machinery & Reactors, Electrical Machinery, Plastics & Chemicals, Optical Instruments, Medical Equipment, Metals & Steel, Hand Tools & Hardware, Textiles & Apparel, Food & Agriculture, or Renewable Energy & Smart Infrastructure",
-  "business_size": "Small, Medium, or Large based on employee count",
-  "employees": "Estimated employee count or null",
+  "cage_code": "CAGE code if found on SAM.gov, otherwise null",
+  "name": "Official company name",
+  "location": "City, State, Country",
+  "website": "Main company website URL",
+  "description": "2-3 sentences about their products/services",
+  "category": "Best match from: ICT & Semiconductors, Machine Tools, Auto Parts, Machinery & Reactors, Electrical Machinery, Plastics & Chemicals, Optical Instruments, Medical Equipment, Metals & Steel, Hand Tools & Hardware, Textiles & Apparel, Food & Agriculture, Renewable Energy & Smart Infrastructure",
+  "business_size": "Small, Medium, or Large",
+  "employees": "Number or null",
   "made_in_usa": "true or false",
-  "taa_verified": "true or false if information available, otherwise false",
-  "berry_act_eligible": "true or false if information available, otherwise false"
-}
-
-Be practical: if exact info is unavailable, make reasonable inferences based on company size and industry. Return valid JSON only.`;
-
+  "taa_verified": "true or false",
+  "berry_act_eligible": "true or false"
+}`
+          }
+        ];
+        
+        // Call Claude with web search enabled
         const response = await anthropic.messages.create({
           model: 'claude-sonnet-4-6',
-          max_tokens: 1000,
-          messages: [
-            { 
-              role: 'user', 
-              content: prompt
+          max_tokens: 2000,
+          tools: [
+            {
+              type: 'web_search',
+              name: 'web_search'
             }
-          ]
+          ],
+          messages: messages
         });
         
-        // Extract text from response
-        let responseText = '';
-        if (response.content && response.content.length > 0) {
+        // Handle tool use - if Claude needs to search, we continue the conversation
+        let finalText = '';
+        
+        if (response.stop_reason === 'tool_use') {
+          // Claude used web_search tool, now get the result
+          // The API will have already performed the search, we just need the text response
           for (const block of response.content) {
             if (block.type === 'text') {
-              responseText = block.text;
-              break;
+              finalText += block.text;
+            }
+          }
+        } else if (response.stop_reason === 'end_turn') {
+          // Claude finished without tool use
+          for (const block of response.content) {
+            if (block.type === 'text') {
+              finalText += block.text;
             }
           }
         }
         
-        if (!responseText) {
-          console.error('No text response from Claude for:', company.name);
+        if (!finalText || finalText.trim().length === 0) {
+          console.error('No response from Claude for:', company.name);
           continue;
         }
         
-        // Clean JSON (remove markdown if present)
-        responseText = responseText.trim();
-        if (responseText.includes('```')) {
-          responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        // Clean JSON
+        finalText = finalText.trim();
+        const jsonMatch = finalText.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+          console.error('No JSON found in response for:', company.name);
+          continue;
         }
         
-        // Parse JSON
-        const vendorData = JSON.parse(responseText);
+        const vendorData = JSON.parse(jsonMatch[0]);
         
         // Ensure required fields
         vendorData.logo_url = null;
@@ -221,7 +232,7 @@ Be practical: if exact info is unavailable, make reasonable inferences based on 
         vendors.push(vendorData);
       } catch (error) {
         console.error('Error researching company:', company.name, error.message);
-        // Continue with next company
+        continue;
       }
     }
     
