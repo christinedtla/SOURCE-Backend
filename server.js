@@ -137,66 +137,63 @@ app.delete('/api/vendors/:id', async (req, res) => {
 
 // ============ VENDOR RESEARCH (ADMIN) ============
 
-// Research and populate vendor data using Brave Search API
+// Research and populate vendor data using Claude web search
 app.post('/api/research-vendors', async (req, res) => {
   try {
-    console.log('research-vendors endpoint called');
     const { companies } = req.body;
-    const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
     const vendors = [];
     
-    if (!companies || companies.length === 0) {
+    if (!companies || !Array.isArray(companies) || companies.length === 0) {
       return res.json({ vendors: [] });
     }
     
     for (const company of companies) {
       try {
-        const searchQuery = company.website ? `${company.name}` : company.name;
-        console.log('Researching:', searchQuery);
+        console.log('Researching:', company.name);
         
-        // Call Brave Search
-        const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(searchQuery)}&count=3`;
-        const braveRes = await fetch(url, {
-          headers: { 'X-Subscription-Token': BRAVE_API_KEY }
-        });
-        
-        const braveData = await braveRes.json();
-        let summary = 'No results found';
-        
-        if (braveData.web && braveData.web.results && braveData.web.results.length > 0) {
-          summary = braveData.web.results.map(r => `${r.title}: ${r.description}`).join('\n');
-        }
-        
-        // Get Claude to structure it
+        // Call Claude with web_search
         const response = await anthropic.messages.create({
           model: 'claude-sonnet-4-6',
-          max_tokens: 300,
+          max_tokens: 500,
+          tools: [{ type: 'web_search', name: 'web_search' }],
           messages: [{
             role: 'user',
-            content: `Extract vendor info from this search result about "${searchQuery}":
-${summary}
-
-Return ONLY JSON:
-{"name":"${company.name}","location":"USA","website":"${company.website || 'unknown'}","description":"vendor","category":"ICT & Semiconductors","business_size":"Medium","employees":null,"made_in_usa":true,"taa_verified":false,"berry_act_eligible":false,"cage_code":null}`
+            content: `Search the web for "${company.name}" and return ONLY this JSON (no markdown):
+{
+  "name": "Official company name",
+  "website": "Main website URL or empty string",
+  "description": "1-2 sentence description",
+  "category": "Product category or industry",
+  "location": "City, Country"
+}`
           }]
         });
         
-        const text = response.content[0].text;
-        const json = JSON.parse(text);
-        json.logo_url = null;
-        json.product_images = [];
-        json.created_at = new Date().toISOString();
-        json.updated_at = new Date().toISOString();
+        // Extract text from response
+        let text = '';
+        for (const block of response.content) {
+          if (block.type === 'text') {
+            text = block.text;
+            break;
+          }
+        }
         
-        vendors.push(json);
+        // Parse JSON
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const vendor = JSON.parse(jsonMatch[0]);
+          vendor.product_images = [];
+          vendors.push(vendor);
+          console.log('Success:', vendor.name);
+        }
       } catch (e) {
-        console.error('Error:', e.message);
+        console.error('Error researching', company.name, ':', e.message);
       }
     }
     
     res.json({ vendors });
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error:', error.message);
     res.json({ vendors: [] });
   }
 });
