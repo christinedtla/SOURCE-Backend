@@ -137,13 +137,18 @@ app.delete('/api/vendors/:id', async (req, res) => {
 
 // ============ VENDOR RESEARCH (ADMIN) ============
 
-// Research and populate vendor data from company names using Claude's web search
+// Research and populate vendor data using Brave Search API
 app.post('/api/research-vendors', async (req, res) => {
   try {
     const { companies } = req.body;
+    const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
     
     if (!companies || !Array.isArray(companies)) {
       return res.status(400).json({ error: 'Invalid input' });
+    }
+    
+    if (!BRAVE_API_KEY) {
+      return res.status(500).json({ error: 'Brave API key not configured' });
     }
     
     const vendors = [];
@@ -153,13 +158,57 @@ app.post('/api/research-vendors', async (req, res) => {
         const searchQuery = company.website ? `${company.name} ${company.website}` : company.name;
         console.log(`\n=== Researching: ${searchQuery} ===`);
         
-        // Initial message to search the web
-        let messages = [
-          { 
-            role: 'user', 
-            content: `Search the web for information about: "${searchQuery}"
-            
-Then provide ONLY this JSON (no markdown, no extra text):
+        // Search using Brave Search API
+        console.log('Calling Brave Search API...');
+        const braveResponse = await fetch('https://api.search.brave.com/res/v1/web/search', {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+            'X-Subscription-Token': BRAVE_API_KEY
+          },
+          // URLSearchParams for query string
+          body: null
+        });
+        
+        // Use URL with query params instead
+        const braveUrl = new URL('https://api.search.brave.com/res/v1/web/search');
+        braveUrl.searchParams.append('q', searchQuery);
+        braveUrl.searchParams.append('count', '10');
+        
+        const braveRes = await fetch(braveUrl.toString(), {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+            'X-Subscription-Token': BRAVE_API_KEY
+          }
+        });
+        
+        if (!braveRes.ok) {
+          console.error('Brave Search error:', braveRes.status, braveRes.statusText);
+          continue;
+        }
+        
+        const braveData = await braveRes.json();
+        console.log('Brave Search results:', braveData.web ? braveData.web.results.length : 0, 'results found');
+        
+        // Extract search results into a summary for Claude
+        let searchSummary = `Search results for "${searchQuery}":\n\n`;
+        if (braveData.web && braveData.web.results) {
+          braveData.web.results.slice(0, 5).forEach((result, i) => {
+            searchSummary += `${i + 1}. ${result.title}\n`;
+            searchSummary += `   URL: ${result.url}\n`;
+            searchSummary += `   ${result.description}\n\n`;
+          });
+        }
+        
+        console.log('Search summary:', searchSummary.substring(0, 300));
+        
+        // Now use Claude to structure this data
+        const prompt = `Based on these web search results about ${company.name}, extract and structure the information.
+
+${searchSummary}
+
+Return ONLY this JSON (no markdown, no extra text):
 {
   "cage_code": "CAGE code if found, otherwise null",
   "name": "Official company name",
@@ -172,99 +221,48 @@ Then provide ONLY this JSON (no markdown, no extra text):
   "made_in_usa": "true or false",
   "taa_verified": "true or false",
   "berry_act_eligible": "true or false"
-}`
-          }
-        ];
+}`;
         
-        // First request with web search enabled
-        console.log('Sending first request to Claude...');
-        let response = await anthropic.messages.create({
+        console.log('Sending to Claude for synthesis...');
+        const claudeResponse = await anthropic.messages.create({
           model: 'claude-sonnet-4-6',
-          max_tokens: 2000,
-          tools: [
+          max_tokens: 1000,
+          messages: [
             {
-              type: 'web_search',
-              name: 'web_search'
+              role: 'user',
+              content: prompt
             }
-          ],
-          messages: messages
+          ]
         });
         
-        console.log('First response - stop_reason:', response.stop_reason);
-        console.log('First response - content blocks:', response.content.length);
-        response.content.forEach((block, i) => {
-          console.log(`  Block ${i}: type=${block.type}, text=${block.text ? block.text.substring(0, 100) : 'N/A'}`);
-        });
-        
-        // Handle agentic loop - if Claude used tool, continue conversation
-        let attempts = 0;
-        const maxAttempts = 3;
-        
-        while (response.stop_reason === 'tool_use' && attempts < maxAttempts) {
-          attempts++;
-          console.log(`Continuing conversation (attempt ${attempts})...`);
-          
-          // Add Claude's response to message history
-          messages.push({
-            role: 'assistant',
-            content: response.content
-          });
-          
-          // Follow-up message to get synthesis
-          messages.push({
-            role: 'user',
-            content: 'Based on your search results, now provide the JSON data I requested.'
-          });
-          
-          // Continue conversation
-          response = await anthropic.messages.create({
-            model: 'claude-sonnet-4-6',
-            max_tokens: 2000,
-            tools: [
-              {
-                type: 'web_search',
-                name: 'web_search'
-              }
-            ],
-            messages: messages
-          });
-          
-          console.log(`Response ${attempts} - stop_reason:`, response.stop_reason);
-          console.log(`Response ${attempts} - content blocks:`, response.content.length);
-          response.content.forEach((block, i) => {
-            console.log(`  Block ${i}: type=${block.type}, text=${block.text ? block.text.substring(0, 150) : 'N/A'}`);
-          });
-        }
-        
-        // Extract text from final response
         let responseText = '';
-        for (const block of response.content) {
+        for (const block of claudeResponse.content) {
           if (block.type === 'text') {
-            responseText += block.text + '\n';
+            responseText += block.text;
           }
         }
         
-        console.log('Final response text:', responseText.substring(0, 300));
+        console.log('Claude response:', responseText.substring(0, 300));
         
         if (!responseText || responseText.trim().length === 0) {
-          console.error('ERROR: No text response from Claude for:', company.name);
+          console.error('ERROR: No response from Claude for:', company.name);
           continue;
         }
         
-        // Extract JSON from response (handle markdown if present)
+        // Extract JSON
         responseText = responseText.trim();
         const jsonMatch = responseText.match(/\{[\s\S]*\}/);
         
         if (!jsonMatch) {
-          console.error('ERROR: No JSON found in response for:', company.name);
-          console.error('Response was:', responseText.substring(0, 500));
+          console.error('ERROR: No JSON found for:', company.name);
+          console.error('Response:', responseText.substring(0, 500));
           continue;
         }
         
         const vendorData = JSON.parse(jsonMatch[0]);
-        console.log('SUCCESS: Parsed vendor data:', vendorData.name);
+        console.log('SUCCESS: Parsed vendor:', vendorData.name);
         
-        // Ensure all required fields exist
+        // Ensure required fields
         vendorData.logo_url = null;
         vendorData.product_images = [];
         vendorData.created_at = new Date().toISOString();
@@ -274,7 +272,6 @@ Then provide ONLY this JSON (no markdown, no extra text):
         
       } catch (error) {
         console.error('ERROR researching company:', company.name, error.message);
-        console.error('Stack:', error.stack);
         continue;
       }
     }
