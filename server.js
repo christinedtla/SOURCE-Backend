@@ -150,49 +150,68 @@ app.post('/api/research-vendors', async (req, res) => {
     
     for (const company of companies) {
       try {
-        // Use Claude to research the company
-        const prompt = `Research this company and provide structured data in JSON format:
+        // Search the web for company info
+        const searchQuery = company.website ? `${company.name} ${company.website}` : company.name;
         
-Company Name: ${company.name}
-Website: ${company.website || 'Unknown'}
+        const response = await anthropic.messages.create({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 1500,
+          tools: [
+            {
+              type: 'web_search',
+              name: 'web_search'
+            }
+          ],
+          messages: [
+            { 
+              role: 'user', 
+              content: `Search the web for information about "${searchQuery}" and then provide structured vendor data in JSON format.
 
-Provide a JSON response with exactly these fields (use null for unknown):
+After searching, extract this information and return ONLY valid JSON (no markdown, no extra text):
 {
-  "cage_code": "XXXXX or similar identifier",
-  "name": "Full company name",
-  "location": "City, Country",
-  "website": "company website URL",
-  "description": "2-3 sentence description of what they do",
-  "category": "Choose from: ICT & Semiconductors, Machine Tools, Auto Parts, Machinery & Reactors, Electrical Machinery, Plastics & Chemicals, Optical Instruments, Medical Equipment, Metals & Steel, Hand Tools & Hardware, Textiles & Apparel, Food & Agriculture, Renewable Energy & Smart Infrastructure",
+  "cage_code": "CAGE code if available, or null",
+  "name": "Full official company name",
+  "location": "City, State/Province, Country",
+  "website": "primary company website URL",
+  "description": "2-3 sentence description of their main products/services",
+  "category": "Best fit from: ICT & Semiconductors, Machine Tools, Auto Parts, Machinery & Reactors, Electrical Machinery, Plastics & Chemicals, Optical Instruments, Medical Equipment, Metals & Steel, Hand Tools & Hardware, Textiles & Apparel, Food & Agriculture, Renewable Energy & Smart Infrastructure",
   "business_size": "Small, Medium, or Large",
-  "employees": null or number,
+  "employees": null or estimated number,
   "made_in_usa": true or false,
   "taa_verified": true or false,
   "berry_act_eligible": true or false
 }
 
-Only return valid JSON, no markdown or extra text.`;
-
-        const response = await anthropic.messages.create({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 500,
-          messages: [
-            { role: 'user', content: prompt }
+Be practical: if you can't find specific info, make a reasonable inference from what you find or use null.`
+            }
           ]
         });
         
-        const responseText = response.content[0].type === 'text' ? response.content[0].text : '';
+        // Extract the text response (after any tool use)
+        let responseText = '';
+        for (const block of response.content) {
+          if (block.type === 'text') {
+            responseText = block.text;
+            break;
+          }
+        }
+        
+        // Clean up JSON (remove markdown if present)
+        responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
         
         // Parse JSON response
         const vendorData = JSON.parse(responseText);
         
-        // Add defaults
+        // Ensure required fields exist
         vendorData.logo_url = null;
         vendorData.product_images = [];
+        vendorData.created_at = new Date().toISOString();
+        vendorData.updated_at = new Date().toISOString();
         
         vendors.push(vendorData);
       } catch (error) {
-        console.error('Error researching company:', company.name, error);
+        console.error('Error researching company:', company.name, error.message);
+        // Continue with next company instead of failing
       }
     }
     
