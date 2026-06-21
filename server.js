@@ -137,7 +137,7 @@ app.delete('/api/vendors/:id', async (req, res) => {
 
 // ============ VENDOR RESEARCH (ADMIN) ============
 
-// Research and populate vendor data from company names using web search
+// Research and populate vendor data from company names using Claude's web search
 app.post('/api/research-vendors', async (req, res) => {
   try {
     const { companies } = req.body;
@@ -152,22 +152,22 @@ app.post('/api/research-vendors', async (req, res) => {
       try {
         const searchQuery = company.website ? `${company.name} ${company.website}` : company.name;
         
-        // First message: ask Claude to search the web
-        const messages = [
+        // Initial message to search the web
+        let messages = [
           { 
             role: 'user', 
-            content: `Search the web for detailed information about: ${searchQuery}
+            content: `Search the web for information about: "${searchQuery}"
             
-Then extract and return ONLY this JSON (no markdown, no extra text):
+Then provide ONLY this JSON (no markdown, no extra text):
 {
-  "cage_code": "CAGE code if found on SAM.gov, otherwise null",
+  "cage_code": "CAGE code if found, otherwise null",
   "name": "Official company name",
-  "location": "City, State, Country",
-  "website": "Main company website URL",
-  "description": "2-3 sentences about their products/services",
-  "category": "Best match from: ICT & Semiconductors, Machine Tools, Auto Parts, Machinery & Reactors, Electrical Machinery, Plastics & Chemicals, Optical Instruments, Medical Equipment, Metals & Steel, Hand Tools & Hardware, Textiles & Apparel, Food & Agriculture, Renewable Energy & Smart Infrastructure",
+  "location": "City, State/Country",
+  "website": "Main website URL",
+  "description": "2-3 sentences about products/services",
+  "category": "Best match: ICT & Semiconductors, Machine Tools, Auto Parts, Machinery & Reactors, Electrical Machinery, Plastics & Chemicals, Optical Instruments, Medical Equipment, Metals & Steel, Hand Tools & Hardware, Textiles & Apparel, Food & Agriculture, or Renewable Energy & Smart Infrastructure",
   "business_size": "Small, Medium, or Large",
-  "employees": "Number or null",
+  "employees": "Estimated count or null",
   "made_in_usa": "true or false",
   "taa_verified": "true or false",
   "berry_act_eligible": "true or false"
@@ -175,8 +175,8 @@ Then extract and return ONLY this JSON (no markdown, no extra text):
           }
         ];
         
-        // Call Claude with web search enabled
-        const response = await anthropic.messages.create({
+        // First request with web search enabled
+        let response = await anthropic.messages.create({
           model: 'claude-sonnet-4-6',
           max_tokens: 2000,
           tools: [
@@ -188,48 +188,72 @@ Then extract and return ONLY this JSON (no markdown, no extra text):
           messages: messages
         });
         
-        // Handle tool use - if Claude needs to search, we continue the conversation
-        let finalText = '';
+        // Handle agentic loop - if Claude used tool, continue conversation
+        let attempts = 0;
+        const maxAttempts = 3;
         
-        if (response.stop_reason === 'tool_use') {
-          // Claude used web_search tool, now get the result
-          // The API will have already performed the search, we just need the text response
-          for (const block of response.content) {
-            if (block.type === 'text') {
-              finalText += block.text;
-            }
-          }
-        } else if (response.stop_reason === 'end_turn') {
-          // Claude finished without tool use
-          for (const block of response.content) {
-            if (block.type === 'text') {
-              finalText += block.text;
-            }
+        while (response.stop_reason === 'tool_use' && attempts < maxAttempts) {
+          attempts++;
+          
+          // Add Claude's response to message history
+          messages.push({
+            role: 'assistant',
+            content: response.content
+          });
+          
+          // Follow-up message to get synthesis
+          messages.push({
+            role: 'user',
+            content: 'Based on your search results, now provide the JSON data I requested.'
+          });
+          
+          // Continue conversation
+          response = await anthropic.messages.create({
+            model: 'claude-sonnet-4-6',
+            max_tokens: 2000,
+            tools: [
+              {
+                type: 'web_search',
+                name: 'web_search'
+              }
+            ],
+            messages: messages
+          });
+        }
+        
+        // Extract text from final response
+        let responseText = '';
+        for (const block of response.content) {
+          if (block.type === 'text') {
+            responseText += block.text + '\n';
           }
         }
         
-        if (!finalText || finalText.trim().length === 0) {
-          console.error('No response from Claude for:', company.name);
+        if (!responseText || responseText.trim().length === 0) {
+          console.error('No text response from Claude for:', company.name);
           continue;
         }
         
-        // Clean JSON
-        finalText = finalText.trim();
-        const jsonMatch = finalText.match(/\{[\s\S]*\}/);
+        // Extract JSON from response (handle markdown if present)
+        responseText = responseText.trim();
+        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+        
         if (!jsonMatch) {
-          console.error('No JSON found in response for:', company.name);
+          console.error('No JSON found in response for:', company.name, 'Response:', responseText.substring(0, 200));
           continue;
         }
         
         const vendorData = JSON.parse(jsonMatch[0]);
         
-        // Ensure required fields
+        // Ensure all required fields exist
         vendorData.logo_url = null;
         vendorData.product_images = [];
         vendorData.created_at = new Date().toISOString();
         vendorData.updated_at = new Date().toISOString();
         
         vendors.push(vendorData);
+        console.log('Successfully researched:', vendorData.name);
+        
       } catch (error) {
         console.error('Error researching company:', company.name, error.message);
         continue;
@@ -238,6 +262,7 @@ Then extract and return ONLY this JSON (no markdown, no extra text):
     
     res.json({ vendors });
   } catch (error) {
+    console.error('Research endpoint error:', error);
     res.status(500).json({ error: error.message });
   }
 });
